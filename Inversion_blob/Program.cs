@@ -25,7 +25,10 @@ class Program
         }
 
         // Download and load images
-        List<(int, Image<Bgra32>)> imageList = new List<(int, Image<Bgra32>)>();
+        List<(int, Image<Bgra32>, bool, bool, bool, bool)> imageList = new List<(int, Image<Bgra32>, bool, bool, bool, bool)>();
+
+        // Assuming the first image is the reference tile
+        Image<Bgra32> referenceTile = null;
 
         for (int i = 1; i <= 1200; i++)
         {
@@ -35,53 +38,86 @@ class Program
             if (File.Exists(localPath))
             {
                 Image<Bgra32> img = Image.Load<Bgra32>(localPath);
-                imageList.Add((i, img));
+                bool hasLeftBorder = HasLeftBorder(img);
+                bool hasRightBorder = HasRightBorder(img);
+                bool hasTopBorder = HasTopBorder(img);
+                bool hasBottomBorder = HasBottomBorder(img);
+
+                // Set the reference tile if not set
+                if (referenceTile == null)
+                {
+                    referenceTile = img;
+                }
+              
+                imageList.Add((i, img, hasLeftBorder, hasRightBorder, hasTopBorder, hasBottomBorder));
                 Console.WriteLine($"Loaded image {i} from local cache");
             }
             else
             {
                 string url = $"{baseUrl}({i}).png";
                 Image<Bgra32> img = DownloadImage(url);
+                bool hasLeftBorder = HasLeftBorder(img);
+                bool hasRightBorder = HasRightBorder(img);
+                bool hasTopBorder = HasTopBorder(img);
+                bool hasBottomBorder = HasBottomBorder(img);
+
+                // Set the reference tile if not set
+                if (referenceTile == null)
+                {
+                    referenceTile = img;
+                }
 
                 // Save the image locally
                 img.Save(localPath);
 
-                imageList.Add((i, img));
+                imageList.Add((i, img, hasLeftBorder, hasRightBorder, hasTopBorder, hasBottomBorder));
                 Console.WriteLine($"Downloaded and cached image {i} of 1200");
             }
         }
 
         Console.WriteLine("Download and processing complete. Starting image reconstruction...");
 
-        Image<Bgra32> referenceTile = imageList[0].Item2;
 
-        // Sort the images based on similarity to the reference tile
-        imageList.Sort((a, b) => CompareImages(a.Item2, referenceTile).CompareTo(CompareImages(b.Item2, referenceTile)));
-
-        // Continue with the rest of your code
-
+        // Sort the images, placing tiles with borders at the end
+        //imageList.Sort((a, b) => CompareImages(b.Item2, referenceTile).CompareTo(CompareImages(a.Item2, referenceTile)));
+        //imageList.Sort((a, b) => CompareColorHistograms(a.Item2, referenceTile).CompareTo(CompareColorHistograms(b.Item2, referenceTile)));
         // Assuming each tile has the same width and height
         int tileWidth = imageList[0].Item2.Width;
         int tileHeight = imageList[0].Item2.Height;
 
         // Calculate the dimensions of the original image including the black border
-        int originalWidth = 40 * tileWidth;
-        int originalHeight = 30 * tileHeight;
+        int originalWidth = 38 * (tileWidth);
+        int originalHeight = 28 * (tileHeight);
 
         // Stitch images together to reconstruct the original image
         Image<Bgra32> resultImage = new Image<Bgra32>(originalWidth, originalHeight);
+        imageList.RemoveAll(x => (x.Item3 == true) || (x.Item4 == true) || (x.Item5 == true) || (x.Item6 == true));
+        // Initialize counters for row and column
+        int currentRow = 0;
+        int currentColumn = 0;
 
-        for (int i = 0; i < imageList.Count; i++)
+        foreach (var imageInfo in imageList)
         {
-            int x = i % 40;
-            int y = i / 40;
+            // Calculate the base position
+            int offsetX = currentColumn * tileWidth;
+            int offsetY = currentRow * tileHeight;
 
-            // Adjust the position by considering the black border
-            int offsetX = x * (tileWidth - 2); // Adjusted for the skipped border
-            int offsetY = y * (tileHeight - 2); // Adjusted for the skipped border
+            // Draw the current tile onto the result image
+            resultImage.Mutate(ctx => ctx.DrawImage(imageInfo.Item2, new Point(offsetX, offsetY), 1f));
 
-            resultImage.Mutate(ctx => ctx.DrawImage(imageList[i].Item2, new Point(offsetX, offsetY), 1f));
+            // Update counters
+            currentColumn++;
+
+            // Move to the next row if we've reached the end of a row
+            if (currentColumn == 40)
+            {
+                currentColumn = 0;
+                currentRow++;
+            }
         }
+
+
+
 
         Console.WriteLine("Image reconstruction complete. Saving result image...");
 
@@ -124,7 +160,11 @@ class Program
     {
         // Use ImageSharp processors to convert to grayscale
         var grayscaleImage = image.Clone(x => x.Grayscale());
-        return grayscaleImage.CloneAs<L8>();
+
+        // Convert to L8 format
+        var grayscale = grayscaleImage.CloneAs<L8>();
+
+        return grayscale;
     }
 
     static int[] CalculateHistogram(Image<L8> image)
@@ -142,30 +182,77 @@ class Program
 
         return histogram;
     }
-
-
-    static double CalculateHistogramCorrelation(int[] histogram1, int[] histogram2)
+    static double CompareColorHistograms(Image<Bgra32> image1, Image<Bgra32> image2)
     {
-        // Calculate correlation coefficient
-        double mean1 = histogram1.Average();
-        double mean2 = histogram2.Average();
+        // Calculate color histograms for the images
+        var histogram1 = CalculateColorHistogram(image1);
+        var histogram2 = CalculateColorHistogram(image2);
 
-        double numerator = 0.0;
-        double denominator1 = 0.0;
-        double denominator2 = 0.0;
+        // Use histogram comparison (you can choose a different method based on your needs)
+        double euclideanDistance = Accord.Math.Distance.Euclidean(histogram1, histogram2);
 
-        for (int i = 0; i < histogram1.Length; i++)
+        // You may need to normalize the distance based on your requirements
+        // For example, you can divide by the length of the histograms.
+        double normalizedDistance = euclideanDistance / histogram1.Length;
+
+        return normalizedDistance;
+    }
+
+    static double[] CalculateColorHistogram(Image<Bgra32> image)
+    {
+        // Get the color histogram
+        var histogram = new double[256 * 3]; // 256 bins for each channel (R, G, B)
+
+        for (int y = 0; y < image.Height; y++)
         {
-            double diff1 = histogram1[i] - mean1;
-            double diff2 = histogram2[i] - mean2;
-
-            numerator += diff1 * diff2;
-            denominator1 += diff1 * diff1;
-            denominator2 += diff2 * diff2;
+            for (int x = 0; x < image.Width; x++)
+            {
+                histogram[image[x, y].R]++;
+                histogram[image[x, y].G + 256]++;
+                histogram[image[x, y].B + 512]++;
+            }
         }
 
-        double correlation = numerator / Math.Sqrt(denominator1 * denominator2);
-
-        return correlation;
+        return histogram;
     }
+    static double CalculateHistogramCorrelation(int[] histogram1, int[] histogram2)
+    {
+        // Convert int[] arrays to double[] arrays
+        double[] doubleHistogram1 = Array.ConvertAll(histogram1, x => (double)x);
+        double[] doubleHistogram2 = Array.ConvertAll(histogram2, x => (double)x);
+
+        // Use histogram comparison (you can choose a different method based on your needs)
+        double euclideanDistance = Accord.Math.Distance.Euclidean(doubleHistogram1, doubleHistogram2);
+
+        // You may need to normalize the distance based on your requirements
+        // For example, you can divide by the length of the histograms.
+        double normalizedDistance = euclideanDistance / histogram1.Length;
+
+        return normalizedDistance;
+    }
+
+    static bool HasLeftBorder(Image<Bgra32> image)
+    {
+        // Check if there is a black line on the left side
+        return Enumerable.Range(0, image.Height).Any(y => image[0, y].A > 0 && image[0, y].R < 30 && image[0, y].G < 30 && image[0, y].B < 30);
+    }
+
+    static bool HasRightBorder(Image<Bgra32> image)
+    {
+        // Check if there is a black line on the right side
+        return Enumerable.Range(0, image.Height).Any(y => image[image.Width - 1, y].A > 0 && image[image.Width - 1, y].R < 30 && image[image.Width - 1, y].G < 30 && image[image.Width - 1, y].B < 30);
+    }
+
+    static bool HasTopBorder(Image<Bgra32> image)
+    {
+        // Check if there is a black line on the top side
+        return Enumerable.Range(0, image.Width).Any(x => image[x, 0].A > 0 && image[x, 0].R < 30 && image[x, 0].G < 30 && image[x, 0].B < 30);
+    }
+
+    static bool HasBottomBorder(Image<Bgra32> image)
+    {
+        // Check if there is a black line on the bottom side
+        return Enumerable.Range(0, image.Width).Any(x => image[x, image.Height - 1].A > 0 && image[x, image.Height - 1].R < 30 && image[x, image.Height - 1].G < 30 && image[x, image.Height - 1].B < 30);
+    }
+
 }
